@@ -1,7 +1,10 @@
 from fastapi.testclient import TestClient
-from problems import app
+
+import problems
+from main import app
 
 client = TestClient(app)
+app.include_router(problems.router)
 
 def test_create_and_get_problem():
     payload = {
