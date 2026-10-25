@@ -1,9 +1,15 @@
 from enum import Enum
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+import jwt
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, EmailStr
 from pwdlib import PasswordHash
+
+from auth import create_access_token, decode_access_token
+
+bearer_scheme = HTTPBearer
 
 router = APIRouter()
 
@@ -20,6 +26,14 @@ class UserBase(BaseModel):
 
 class Register(UserBase):
     password: str = Field(min_length=8)
+
+class Login(BaseModel):
+    username: str
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
 class UserPublic(UserBase):
     id: int
@@ -65,16 +79,44 @@ async def register(data: Register) -> UserPublic:
     next_user_id += 1
     return user
 
+@router.post("/login")
+async def login(data: Login) -> Token:
+    for u in users_db.values():
+        if u["username"] == data.username:
+            if verify_password(data.password, u["password_hash"]):
+                return Token(access_token=create_access_token(u["id"]))
+            break
+    raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+async def get_current_user(
+        credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+) -> dict:
+    try:
+        user_id = decode_access_token(credentials.credentials)
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = users_db.get(user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="User no longer exists")
+    return user
+
+
 @router.get("/users/")
 async def list_users()  -> list[UserPublic]:
     users = list(users_db.values())
     return users
+
+@router.get("/users/me")
+async def read_me(current_user: dict = Depends(get_current_user)) -> UserPublic:
+    return current_user
 
 @router.get("/users/{user_id}")
 async def get_user(user_id: int) -> UserPublic:
     if user_id not in users_db:
         raise HTTPException(status_code=404, detail="User not found")
     return users_db[user_id]
+
 
 @router.patch("/users/{user_id}")
 async def update_user(user_id: int, data: UserUpdate) -> UserPublic:

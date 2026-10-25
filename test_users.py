@@ -12,7 +12,7 @@ def reset_db():
     user.next_user_id = 1
     yield
 
-def test_get_user_does_not_leak_password_hash():
+def test_get_user_does_not_leak_password_hash() -> None:
     client.post("/users/", json={
         "username": "ivan",
         "email": "ivan@example.com",
@@ -22,7 +22,7 @@ def test_get_user_does_not_leak_password_hash():
     assert r.status_code == 200
     assert "password_hash" not in r.json()
 
-def test_list_users_does_not_leak_password_hash():
+def test_list_users_does_not_leak_password_hash() -> None:
     client.post("/users/", json={
         "username": "ivan",
         "email": "ivan@example.com",
