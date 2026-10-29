@@ -117,9 +117,14 @@ async def get_user(user_id: int) -> UserPublic:
         raise HTTPException(status_code=404, detail="User not found")
     return users_db[user_id]
 
+def ensure_self_or_admin(current_user: dict, user_id: int) -> None:
+    if current_user["id"] != user_id and current_user["role"] != Role.admin:
+        raise HTTPException(status_code=403, detail="Not allowed")
 
 @router.patch("/users/{user_id}")
-async def update_user(user_id: int, data: UserUpdate) -> UserPublic:
+async def update_user(user_id: int, data: UserUpdate, current_user: dict = Depends(get_current_user)) -> UserPublic:
+    ensure_self_or_admin(current_user, user_id)
+    
     if user_id not in users_db:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -140,7 +145,9 @@ async def update_user(user_id: int, data: UserUpdate) -> UserPublic:
     return users_db[user_id]
         
 @router.delete("/users/{user_id}", status_code=204)
-async def delete_user(user_id: int) -> None:
+async def delete_user(user_id: int, current_user: dict= Depends(get_current_user)) -> None:
+    ensure_self_or_admin(current_user, user_id)
+
     if user_id not in users_db:
         raise HTTPException(status_code=404, detail="User not found")
     del users_db[user_id]
