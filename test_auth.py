@@ -6,11 +6,9 @@ import pytest
 import auth
 from auth import create_access_token, decode_access_token
 
-
 def test_token_roundtrip() -> None:
-    token = create_access_token(5)
-    assert decode_access_token(token) == 5
-
+    token = create_access_token("5")
+    assert decode_access_token(token) == "5"
 
 def test_token_has_three_parts() -> None:
     token = create_access_token(5)
@@ -18,7 +16,7 @@ def test_token_has_three_parts() -> None:
 
 
 def test_payload_contains_sub_and_exp() -> None:
-    token = create_access_token(5)
+    token = create_access_token("5")
     payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
     assert payload["sub"] == "5"
     assert "exp" in payload
