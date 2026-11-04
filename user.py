@@ -4,11 +4,14 @@ from datetime import datetime, timezone
 import jwt
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, field_validator
 from pwdlib import PasswordHash
 from uuid import UUID, uuid4
 
 from auth import create_access_token, decode_access_token
+
+# TODO: create the initial admin user when switching to a SQL database
+# (seed script or migration, password from ADMIN_PASSWORD env var)
 
 bearer_scheme = HTTPBearer()
 
@@ -24,8 +27,13 @@ class UserBase(BaseModel):
     username: str = Field(min_length=3, max_length=18)
     email: EmailStr
 
+    @field_validator("email")
+    @classmethod
+    def lowercase_email(cls, v: str) -> str:
+        return v.lower()
+
 class Register(UserBase):
-    password: str = Field(min_length=8)
+    password: str = Field(min_length=8, max_length=128)
 
 class Login(BaseModel):
     username: str
@@ -47,6 +55,11 @@ class UserUpdate(BaseModel):
     username: str | None = Field(default=None, min_length=3, max_length=18)
     email: EmailStr | None = None
     password: str | None= Field(default=None, min_length=8)
+
+    @field_validator("email")
+    @classmethod
+    def lowercase_email(cls, v: str | None) -> str | None:
+        return v.lower() if v else v
 
 password_hasher: PasswordHash= PasswordHash.recommended()
 
@@ -108,24 +121,34 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="User no longer exists")
     return user
 
-@router.get("/users/")
-async def list_users()  -> list[UserPublic]:
-    users = list(users_db.values())
-    return users
+async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user["role"] != Role.admin:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    return current_user
+
+def ensure_self_or_admin(current_user: dict, user_id: UUID) -> None:
+    if current_user["id"] != user_id and current_user["role"] != Role.admin:
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+@router.get("/users/", dependencies=[Depends(require_admin)])
+async def list_users() -> list[UserPublic]:
+    return list(users_db.values())
 
 @router.get("/users/me")
 async def read_me(current_user: dict = Depends(get_current_user)) -> UserPublic:
     return current_user
 
 @router.get("/users/{user_id}")
-async def get_user(user_id: UUID) -> UserPublic:
-    if user_id not in users_db:
-        raise HTTPException(status_code=404, detail="User not found")
-    return users_db[user_id]
+async def get_user(
+    user_id: UUID,
+    current_user: dict = Depends(get_current_user),
+) -> UserPublic:
+    ensure_self_or_admin(current_user, user_id)
 
-def ensure_self_or_admin(current_user: dict, user_id: UUID) -> None:
-    if current_user["id"] != user_id and current_user["role"] != Role.admin:
-        raise HTTPException(status_code=403, detail="Not allowed")
+    user = users_db.get(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return UserPublic.model_validate(user)
 
 @router.patch("/users/{user_id}")
 async def update_user(user_id: UUID, data: UserUpdate, current_user: dict = Depends(get_current_user)) -> UserPublic:
@@ -157,4 +180,3 @@ async def delete_user(user_id: UUID, current_user: dict= Depends(get_current_use
     if user_id not in users_db:
         raise HTTPException(status_code=404, detail="User not found")
     del users_db[user_id]
-    
