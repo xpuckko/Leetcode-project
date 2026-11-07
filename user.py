@@ -115,10 +115,8 @@ async def register(data: Register) -> UserPublic:
 async def login(data: Login) -> Token:
     user = next((u for u in users_db.values() if u["username"] == data.username), None)
 
-    password_ok = verify_password(
-        data.password,
-        user["password_hash"] if user else DUMMY_HASH, #bad way - fix
-    )
+    hash_to_check = user["password_hash"] if user else DUMMY_HASH
+    password_ok = verify_password(data.password, hash_to_check)
 
     if user is None or not password_ok:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
