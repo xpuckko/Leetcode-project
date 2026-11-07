@@ -88,7 +88,7 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
 # Dummy hash used to equalize timing in login: for a non-existent user we still
 # run the expensive password check, so response time doesn't reveal which accounts exist.
 # (User enumiration via timing attack)
-DUMMY_HASH = hash_password("dummy-password") # read what security that is
+DUMMY_HASH = hash_password("dummy-password")
 
 @router.post("/users/", status_code=201)
 async def register(data: Register) -> UserPublic:
@@ -200,5 +200,3 @@ async def delete_user(user_id: UUID, current_user: dict= Depends(get_current_use
     if user_id not in users_db:
         raise HTTPException(status_code=404, detail="User not found")
     del users_db[user_id]
-
-# fix requirements

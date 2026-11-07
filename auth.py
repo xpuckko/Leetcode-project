@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from dotenv import load_dotenv
 
+# Loads variables from a local .env file into the environment,
+# secrets like SECRET_KEY stay out of the source code.
 load_dotenv()
 
 SECRET_KEY = os.environ["SECRET_KEY"]
