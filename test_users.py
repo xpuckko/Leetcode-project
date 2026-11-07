@@ -62,10 +62,10 @@ def test_get_other_user_returns_403():
     assert r.status_code == 403
 
 
-def test_get_invalid_uuid_returns_422():
+def test_get_invalid_uuid_returns_404():
     create_user()
     r = client.get("/users/5", headers=auth_headers())
-    assert r.status_code == 422
+    assert r.status_code == 404
 
 
 def test_list_users_as_regular_user_returns_403():
