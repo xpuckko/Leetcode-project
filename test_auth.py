@@ -49,6 +49,6 @@ def test_expired_token_is_rejected() -> None:
         decode_access_token(expired)
 
 
-def test_garbage_string_is_rejected() -> None:
+def test_wrong_string_is_rejected() -> None:
     with pytest.raises(jwt.InvalidTokenError):
         decode_access_token("not-a-token")
