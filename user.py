@@ -75,7 +75,7 @@ class UserUpdate(BaseModel):
     @field_validator("email")
     @classmethod
     def lowercase_email(cls, v: str | None) -> str | None:
-        return v.lower() if v else v #read whats it called
+        return v.lower() if v else v
 
 password_hasher: PasswordHash = PasswordHash.recommended()
 
