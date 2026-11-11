@@ -200,3 +200,4 @@ async def delete_user(user_id: UUID, current_user: dict= Depends(get_current_use
     if user_id not in users_db:
         raise HTTPException(status_code=404, detail="User not found")
     del users_db[user_id]
+

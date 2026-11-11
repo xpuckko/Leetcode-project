@@ -33,3 +33,4 @@ async def create_language(data: LanguageIn) -> Language:
     next_language_id += 1
     languages_db[language.id] = language.model_dump() 
     return language
+
