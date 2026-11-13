@@ -6,6 +6,7 @@ email-validator
 PyJWT
 pwdlib[argon2]
 python-dotenv
+sqlmodel
 
 # Testing
 pytest

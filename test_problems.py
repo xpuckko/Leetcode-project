@@ -2,9 +2,11 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel.pool import StaticPool
 
-import problems
 import user
+from database import get_session
 from main import app
 
 client = TestClient(app)
@@ -12,10 +14,22 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def reset_db():
     user.users_db.clear()
-    problems.problems_db.clear()
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    def override_get_session():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_get_session
     yield
+    app.dependency_overrides.clear()
     user.users_db.clear()
-    problems.problems_db.clear()
 
 
 def create_user(username="ivan", email="ivan@example.com", password="supersecret1"):
