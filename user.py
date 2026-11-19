@@ -1,23 +1,24 @@
+import os
 from enum import Enum
 from datetime import datetime, timezone
+from uuid import UUID, uuid4
+import secrets
 
 import jwt
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field, EmailStr, field_validator
+from pydantic import EmailStr, field_validator
 from pwdlib import PasswordHash
-from uuid import UUID, uuid4
+from sqlalchemy import String
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import SQLModel, Field, Session, select
 
 from auth import create_access_token, decode_access_token
-
-# TODO: create the initial admin user when switching to a SQL database
-# (seed script or migration, password from ADMIN_PASSWORD env var)
+from database import SessionDep, engine
 
 bearer_scheme = HTTPBearer()
 
 router = APIRouter()
-
-users_db: dict[UUID, dict] = {}
 
 class Role(str, Enum):
     admin = "admin"
@@ -29,11 +30,11 @@ MIN_USERNAME_LENGTH = 3
 
 #30 maximum prevents users from entering really long names that would use a lot of storage.
 #Having maximum length for a name also helps readabily since names that are too long may be uncomftorable to read
-MAX_USERNAME_LENGTH = 20
+MAX_USERNAME_LENGTH = 30
 
-class UserBase(BaseModel):
-    username: str = Field(min_length= MIN_USERNAME_LENGTH, max_length= MAX_USERNAME_LENGTH)
-    email: EmailStr
+class UserBase(SQLModel):
+    username: str = Field(min_length= MIN_USERNAME_LENGTH, max_length= MAX_USERNAME_LENGTH, unique=True, index=True)
+    email: EmailStr = Field(sa_type=String, unique=True, index=True)
 
     @field_validator("email")
     @classmethod
@@ -41,7 +42,7 @@ class UserBase(BaseModel):
         return v.lower()
 
 # NIST SP 800-63B-4 (3.1.1.2): 15 minimum when the password is the only factor.
-MIN_PASSWORD_LENGTH = 8
+MIN_PASSWORD_LENGTH = 15
 
 # Bounds input so huge payloads can't be used to waste CPU during hashing.
 # Still well above NIST's recommended minimum of 64 allowed characters,
@@ -51,26 +52,26 @@ MAX_PASSWORD_LENGTH = 128
 class Register(UserBase):
     password: str = Field(min_length= MIN_PASSWORD_LENGTH, max_length= MAX_PASSWORD_LENGTH)
 
-class Login(BaseModel):
+class Login(SQLModel):
     username: str
     password: str
 
-class Token(BaseModel):
+class Token(SQLModel):
     access_token: str
     token_type: str = "bearer"
 
 class UserPublic(UserBase):
-    id: UUID
-    role: Role
-    created_at: datetime
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    role: Role= Field(default=Role.user)
+    created_at: datetime= Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class UserModel(UserPublic):
+class UserModel(UserPublic, table=True):
     password_hash: str
 
-class UserUpdate(BaseModel):
-    username: str | None = Field(default=None, min_length=3, max_length=18)
+class UserUpdate(SQLModel):
+    username: str | None = Field(default=None, min_length=MIN_USERNAME_LENGTH, max_length=MAX_USERNAME_LENGTH)
     email: EmailStr | None = None
-    password: str | None= Field(default=None, min_length=8)
+    password: str | None= Field(default=None, min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_LENGTH)
 
     @field_validator("email")
     @classmethod
@@ -90,114 +91,154 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
 # (User enumiration via timing attack)
 DUMMY_HASH = hash_password("dummy-password")
 
-@router.post("/users/", status_code=201)
-async def register(data: Register) -> UserPublic:
+# Creates the first admin at startup (call it from the lifespan in main.py).
+# The password comes from the ADMIN_PASSWORD environment variable.
+def seed_admin() -> None:
+    password = os.environ.get("ADMIN_PASSWORD")
+    if not password:
+        return
+    with Session(engine) as session:
+        if session.exec(select(UserModel).where(UserModel.role == Role.admin)).first():
+            return
+        session.add(UserModel(
+            username="admin",
+            email="admin@example.com",
+            role=Role.admin,
+            password_hash=hash_password(password),
+        ))
+        session.commit()
 
-    for u in users_db.values():
-        if u["username"] == data.username:
-            raise HTTPException(status_code=409, detail="Username already taken")
-        if u["email"] == data.email:
-            raise HTTPException(status_code=409, detail="Email already registered")
-
-    user = UserModel(
-        id=uuid4(),
-        username=data.username,
-        email=data.email,
-        role=Role.user,
-        created_at=datetime.now(timezone.utc),
-        password_hash=hash_password(data.password),
-    )
-
-    users_db[user.id] = user.model_dump()
-    return user
-
-@router.post("/login")
-async def login(data: Login) -> Token:
-    user = next((u for u in users_db.values() if u["username"] == data.username), None)
-
-    hash_to_check = user["password_hash"] if user else DUMMY_HASH
-    password_ok = verify_password(data.password, hash_to_check)
-
-    if user is None or not password_ok:
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
-
-    return Token(access_token=create_access_token(str(user["id"])))
-
-async def get_current_user(
-        credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
-) -> dict:
+def get_current_user(
+    session: SessionDep,
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> UserModel:
     try:
         user_id = UUID(decode_access_token(credentials.credentials))
     except (jwt.InvalidTokenError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    user = users_db.get(user_id)
+    user = session.get(UserModel, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="User no longer exists")
     return user
 
-async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
-    if current_user["role"] != Role.admin:
+def require_admin(current_user: UserModel = Depends(get_current_user)) -> UserModel:
+    if current_user.role != Role.admin:
         raise HTTPException(status_code=403, detail="Not allowed")
     return current_user
 
-def ensure_self_or_admin(current_user: dict, user_id: UUID) -> None:
-    if current_user["id"] != user_id and current_user["role"] != Role.admin:
+def ensure_self_or_admin(current_user: UserModel, user_id: UUID) -> None:
+    if current_user.id != user_id and current_user.role != Role.admin:
         raise HTTPException(status_code=403, detail="Not allowed")
 
+@router.post("/users/", status_code=201)
+def register(data: Register, session: SessionDep) -> UserPublic:
+    if session.exec(select(UserModel).where(UserModel.username == data.username)).first():
+        raise HTTPException(status_code=409, detail="Username already taken")
+    if session.exec(select(UserModel).where(UserModel.email == data.email)).first():
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    user = UserModel(
+        username=data.username,
+        email=data.email,
+        password_hash=hash_password(data.password),
+    )
+
+    session.add(user)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Username or email already taken")
+    session.refresh(user)
+    return user
+
+@router.post("/login")
+def login(data: Login, session: SessionDep) -> Token:
+    user = session.exec(select(UserModel).where(UserModel.username == data.username)).first()
+
+    hash_to_check = user.password_hash if user else DUMMY_HASH
+    password_ok = verify_password(data.password, hash_to_check)
+
+    if user is None or not password_ok:
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+    return Token(access_token=create_access_token(str(user.id)))
+
 @router.get("/users/", dependencies=[Depends(require_admin)])
-async def list_users() -> list[UserPublic]:
-    return list(users_db.values())
+def list_users(session: SessionDep) -> list[UserPublic]:
+    return session.exec(select(UserModel)).all()
 
 @router.get("/users/me")
-async def read_me(current_user: dict = Depends(get_current_user)) -> UserPublic:
+def read_me(current_user: UserModel = Depends(get_current_user)) -> UserPublic:
     return current_user
 
 @router.get("/users/{user_id}")
-async def get_user(
+def get_user(
     user_id: str,
-    current_user: dict = Depends(get_current_user),
+    session: SessionDep,
+    current_user: UserModel = Depends(get_current_user),
 ) -> UserPublic:
     try:
         parsed_id = UUID(user_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    ensure_self_or_admin(current_user, user_id)
 
-    user = users_db.get(user_id)
+    ensure_self_or_admin(current_user, parsed_id)
+
+    user = session.get(UserModel, parsed_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return UserPublic.model_validate(user)
+    return user
 
 @router.patch("/users/{user_id}")
-async def update_user(user_id: UUID, data: UserUpdate, current_user: dict = Depends(get_current_user)) -> UserPublic:
+def update_user(user_id: UUID, data: UserUpdate,session: SessionDep, current_user: UserModel = Depends(get_current_user)) -> UserPublic:
     ensure_self_or_admin(current_user, user_id)
     
-    if user_id not in users_db:
+    user = session.get(UserModel, user_id)
+    if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
     changes = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
-    
-    for other_id, u in users_db.items():
-        if other_id == user_id:
-            continue
-        elif "username" in changes and u["username"] == changes["username"]:
+
+    if "username" in changes:
+        taken = session.exec(
+            select(UserModel).where(UserModel.username == changes["username"], UserModel.id != user_id)
+        ).first()
+        if taken:
             raise HTTPException(status_code=409, detail="Username already taken")
-        elif "email" in changes and u["email"] == changes["email"]:
+    if "email" in changes:
+        taken = session.exec(
+            select(UserModel).where(UserModel.email == changes["email"], UserModel.id != user_id)
+        ).first()
+        if taken:
             raise HTTPException(status_code=409, detail="Email already registered")
 
     if "password" in changes:
         changes["password_hash"] = hash_password(changes.pop("password"))
 
-    users_db[user_id].update(changes)
-    return users_db[user_id]
+    user.sqlmodel_update(changes)
+    session.add(user)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Username or email already taken")
+    session.refresh(user)
+    return user
+    
         
 @router.delete("/users/{user_id}", status_code=204)
-async def delete_user(user_id: UUID, current_user: dict= Depends(get_current_user)) -> None:
+def delete_user(
+    user_id: UUID,
+    session: SessionDep,
+    current_user: UserModel = Depends(get_current_user),
+) -> None:
     ensure_self_or_admin(current_user, user_id)
 
-    if user_id not in users_db:
+    user = session.get(UserModel, user_id)
+    if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    del users_db[user_id]
+    session.delete(user)
+    session.commit()
 

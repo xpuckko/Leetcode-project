@@ -2,21 +2,44 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel.pool import StaticPool
 
 import user
+from database import get_session
 from main import app
+
+test_engine = create_engine(
+    "sqlite://",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+
+def override_get_session():
+    with Session(test_engine) as session:
+        yield session
 
 client = TestClient(app)
 
-
 @pytest.fixture(autouse=True)
 def reset_db():
-    user.users_db.clear()
+    SQLModel.metadata.drop_all(test_engine)
+    SQLModel.metadata.create_all(test_engine)
+    app.dependency_overrides[get_session] = override_get_session
     yield
-    user.users_db.clear()
+    app.dependency_overrides.pop(get_session, None)
+    SQLModel.metadata.drop_all(test_engine)
+
+PASSWORD = "supersecret12345"
+NEW_PASSWORD = "newsecret123456789"
 
 
-def create_user(username="ivan", email="ivan@example.com", password="supersecret1"):
+def get_password_hash(user_id: UUID) -> str:
+    with Session(test_engine) as session:
+        return session.get(user.UserModel, user_id).password_hash
+
+
+def create_user(username="ivan", email="ivan@example.com", password=PASSWORD):
     r = client.post("/users/", json={
         "username": username,
         "email": email,
@@ -26,14 +49,18 @@ def create_user(username="ivan", email="ivan@example.com", password="supersecret
     return r.json()
 
 
-def auth_headers(username="ivan", password="supersecret1"):
+def auth_headers(username="ivan", password=PASSWORD):
     r = client.post("/login", json={"username": username, "password": password})
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
 
 
 def make_admin(user_id: str) -> None:
-    user.users_db[UUID(user_id)]["role"] = user.Role.admin
+    with Session(test_engine) as session:
+        db_user = session.get(user.UserModel, UUID(user_id))
+        db_user.role = user.Role.admin
+        session.add(db_user)
+        session.commit()
 
 
 def test_get_own_user_does_not_leak_password_hash():
@@ -100,7 +127,7 @@ def test_patch_user_changes_email():
 
 def test_patch_user_does_not_leak_password_hash():
     u = create_user()
-    r = client.patch(f"/users/{u['id']}", json={"password": "newsecret123"},
+    r = client.patch(f"/users/{u['id']}", json={"password": NEW_PASSWORD},
                      headers=auth_headers())
     assert r.status_code == 200
     assert "password_hash" not in r.json()
@@ -110,12 +137,12 @@ def test_patch_user_does_not_leak_password_hash():
 def test_patch_user_changes_password_hash():
     u = create_user()
     uid = UUID(u["id"])
-    old_hash = user.users_db[uid]["password_hash"]
-    client.patch(f"/users/{u['id']}", json={"password": "newsecret123"},
+    old_hash = get_password_hash(uid)
+    client.patch(f"/users/{u['id']}", json={"password": NEW_PASSWORD},
                  headers=auth_headers())
-    new_hash = user.users_db[uid]["password_hash"]
+    new_hash = get_password_hash(uid)
     assert new_hash != old_hash
-    assert user.verify_password("newsecret123", new_hash)
+    assert user.verify_password(NEW_PASSWORD, new_hash)
 
 
 def test_patch_other_user_returns_403():
@@ -198,6 +225,6 @@ def test_register_emails_differing_only_in_case_conflict():
     r = client.post("/users/", json={
         "username": "petar",
         "email": "IVAN@example.com",
-        "password": "supersecret1",
+        "password": PASSWORD,
     })
     assert r.status_code == 409

@@ -11,28 +11,33 @@ from main import app
 
 client = TestClient(app)
 
+test_engine = create_engine(
+    "sqlite://",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+
+client = TestClient(app)
+
+PASSWORD = "supersecret12345"
+
+
+def override_get_session():
+    with Session(test_engine) as session:
+        yield session
+
+
 @pytest.fixture(autouse=True)
 def reset_db():
-    user.users_db.clear()
-
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-
-    def override_get_session():
-        with Session(engine) as session:
-            yield session
-
+    SQLModel.metadata.drop_all(test_engine)
+    SQLModel.metadata.create_all(test_engine)
     app.dependency_overrides[get_session] = override_get_session
     yield
-    app.dependency_overrides.clear()
-    user.users_db.clear()
+    app.dependency_overrides.pop(get_session, None)
+    SQLModel.metadata.drop_all(test_engine)
 
 
-def create_user(username="ivan", email="ivan@example.com", password="supersecret1"):
+def create_user(username="ivan", email="ivan@example.com", password=PASSWORD):
     r = client.post("/users/", json={
         "username": username,
         "email": email,
@@ -42,15 +47,23 @@ def create_user(username="ivan", email="ivan@example.com", password="supersecret
     return r.json()
 
 
-def auth_headers(username="ivan", password="supersecret1"):
+def auth_headers(username="ivan", password=PASSWORD):
     r = client.post("/login", json={"username": username, "password": password})
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
 
 
+def make_admin(user_id: str) -> None:
+    with Session(test_engine) as session:
+        db_user = session.get(user.UserModel, UUID(user_id))
+        db_user.role = user.Role.admin
+        session.add(db_user)
+        session.commit()
+
+
 def admin_headers():
     u = create_user(username="admin1", email="admin1@example.com")
-    user.users_db[UUID(u["id"])]["role"] = user.Role.admin
+    make_admin(u["id"])
     return auth_headers("admin1")
 
 
@@ -75,3 +88,5 @@ def test_create_and_get_problem() -> None:
 def test_get_missing_problem_returns_404() -> None:
     response = client.get(f"/problems/{uuid4()}", headers=admin_headers())
     assert response.status_code == 404
+
+    
