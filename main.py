@@ -6,6 +6,7 @@ from database import create_db_and_tables
 import problems
 import user
 import languages
+import test_case
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -17,3 +18,4 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(problems.router)
 app.include_router(user.router)
 app.include_router(languages.router)
+app.include_router(test_case.router)
