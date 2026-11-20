@@ -34,7 +34,7 @@ def list_problems(
     current_user: dict = Depends(get_current_user),
 ) -> list[Problem]:
     query = select(Problem)
-    if current_user["role"] != Role.admin:
+    if current_user.role != Role.admin:
         query = query.where(Problem.is_visible == True)
     if difficulty is not None:
         query = query.where(Problem.difficulty == difficulty)
@@ -47,7 +47,7 @@ def get_problem(
     current_user: dict = Depends(get_current_user),
 ) -> Problem:
     problem = session.get(Problem, problem_id)
-    if problem is None or (not problem.is_visible and current_user["role"] != Role.admin):
+    if problem is None or (not problem.is_visible and current_user.role != Role.admin):
         raise HTTPException(status_code=404, detail="Problem not found")
     return problem
     
