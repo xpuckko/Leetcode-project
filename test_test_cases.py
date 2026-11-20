@@ -169,7 +169,7 @@ def test_list_test_cases_hides_hidden_ones_and_internal_fields():
 def test_list_test_cases_without_login_is_rejected():
     problem = create_problem(admin_headers())
     r = client.get(f"/problems/{problem['id']}/test-cases/")
-    assert r.status_code in 401
+    assert r.status_code == 401
 
 
 def test_list_test_cases_of_hidden_problem_returns_404_for_user():
